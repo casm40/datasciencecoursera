@@ -1,0 +1,499 @@
+---
+title: "Reproducible Report Submission"
+author: "Colin Melville"
+date: "13 October 2014"
+output: pdf_document
+---
+Introduction
+------------
+Natural language modelling using statistical techniques has developed considerably over the last 20 years or so, with applications including machine translation, voice recognition, internet searching and spelling correction.
+
+Since this was an area with which I was not familiar I spent some time learning about the techniques involved. The Coursera course by [Jurafsky][1] was very helpful, as was his [chapter on N-grams][6] (as PDF). This involved significant background reading and experimentation with the [``tm package``][2] and [``RWeka package``][3].
+
+The aim of the Capstone challenge was to develop a statistical natural language model. This involved:
+
+- acquiring and cleaning a large collection of blog posts, news posts and twitter feeds to create a language Corpus.
+- developing a language model
+- testing this model
+- creating a demonstration project
+
+**NOTE 1:** I have not displayed every line of code in this report so as not to tax the reader particularly with functions applied repetitively. These are set to echo=FALSE, but are embedded to ensure complete reproducibility. I have displayed representative code from key steps to demonstrate clearly what was done.
+
+**NOTE 2:** The seven references used in producing this report are hyperlinked rather than collected at the end of the document.
+
+Methodology
+-----------
+### Data acquisition
+I downloaded the data from the course website as a zip file, unzipped this and explored the files it contained. There were four language folders (German, Finnish, Russian and US English) each containing text files of blogs, news and twitter data. I used the US English files. The blogs consisted of 210 MB, the news 206 MB and the twitter 167 MB.
+
+```{r eval=FALSE, echo=FALSE}
+# Set Directory
+setwd("~/Documents/Capstone")
+```
+
+```{r, eval=FALSE}
+fileUrl <- "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+download.file(fileUrl,destfile = "Coursera-SwiftKey.zip", method="curl")
+unzip("Coursera-SwiftKey.zip")
+```
+
+Libraries required for various parts of the analysis were loaded and the swap file size set appropriately for the later term-document matrix creation.
+```{r eval=FALSE}
+### Load Libraries
+library(tm)
+library(caret)
+options( java.parameters = "-Xmx32g" ) # http://www.bramschoenmakers.nl/en/node/726 Increase swapfile size
+library(RWeka)
+options(mc.cores=1)
+library(stringr)
+library(hash)
+library(utils)
+library(slam)
+```
+```{r eval=FALSE}
+### Load Datasets
+fileUrl <- "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+download.file(fileUrl,destfile = "Coursera-SwiftKey.zip", method="curl")
+datafiles <- unzip("test/Coursera-SwiftKey.zip", list=TRUE) # get data on files
+```
+
+####  Create Partitions
+Next I partitioned the data into training, test and validation datasets. Initially I had planned to use about 80% of the dataset for model building, but in the end used only 10% of it. Despite increasing my iMac's RAM from 4 GB to 32 GB I found that larger datasets soon became prohibitively large to analyse.
+
+```{r eval=FALSE}
+createPartition <- function(fileIn,fileOut){ 
+        # path = path to file e.g. "final/en_US/en_US.blogs.txt"
+        # x = filename e.g. ""
+        file <- readLines(fileIn)
+        inTrain <- createDataPartition(y= 1:length(file), p=0.1,list=FALSE)
+        training <- file[inTrain]
+        remainder <- file[-inTrain]
+        inTest <- createDataPartition(y=1:length(remainder),p=0.1,list=FALSE)
+        testing <- remainder[inTest]
+        validating <-remainder[-inTest]
+        saveRDS(training,paste0("data/train/",fileOut))
+        saveRDS(testing,paste0("data/test/",fileOut))
+        saveRDS(validating,paste0("data/validate/",fileOut))
+}
+```
+
+```{r echo=FALSE, eval=FALSE}
+createPartition("final/en_US/en_US.blogs.txt","blogs.txt")
+createPartition("final/en_US/en_US.news.txt","news.txt")
+createPartition("final/en_US/en_US.twitter.txt","tweets.txt")
+```
+
+### Data cleaning
+I spent some considerable time cleaning the dataset, as there were considerable irregularities the English used in them. These included non-standard spelling and grammar, irregular punctuation, foreign terms, unicode, and emoticons.
+
+```{r echo=FALSE, eval=FALSE}
+#### Load raw texts
+blog <- readLines("final/en_sample/blogSample.txt")
+news <- readLines("final/en_sample/newSample.txt")
+tweets <- readLines("final/en_sample/tweetSample.txt")
+```
+#### Clean texts
+The initial stage was to remove common abbreviations containing periods, such as Prof. and Dr. Sentences markers were inserted: the string " q q q q " was used to mark the start of sentences, and " j j j j " the end. Ellipses (...), exclamation marks, question marks and remaining periods were marked as end of sentences. This process was iteratively improved until automated checking and visual inspection of the resulting texts appeared satisfactory.
+```{r eval=FALSE}
+cleanText <- function(x){
+        x <- gsub("Dr.","dr",x, fixed=TRUE) # ignore.case does not work with text string
+        x <- gsub("Prof.","prof",x, fixed=TRUE)
+        x <- gsub("Hon.","hon",x, fixed=TRUE)
+        x <- gsub("Esq.","esq",x, fixed=TRUE)
+        x <- gsub("Jr.","jr",x, fixed=TRUE)
+        x <- gsub("Mr.","mr",x, fixed=TRUE)
+        x <- gsub("Mrs.","mrs",x, fixed=TRUE)
+        x <- gsub("Mmes.","mmes",x, fixed=TRUE)
+        x <- gsub("Messrs.","messrs",x, fixed=TRUE)
+        x <- gsub("Msgr.","msgr",x, fixed=TRUE)
+        x <- gsub("Rev.","rev",x, fixed=TRUE)
+        x <- gsub("Rt.Hon.","rt hon",x, fixed=TRUE)
+        x <- gsub("Sr.","sr",x, fixed=TRUE)
+        x <- gsub("St.","st",x, fixed=TRUE)
+        x <- gsub("et.c.","etc",x, fixed=TRUE)
+        x <- gsub("a.m.","am",x, fixed=TRUE)
+        x <- gsub("p.m.","pm",x, fixed=TRUE)
+        x <- gsub("e.g..","eg",x, fixed=TRUE)
+        x <- gsub("i.e.","ie",x, fixed=TRUE)
+        x <- gsub("Ltd.","ltd",x, fixed=TRUE)
+        x <- gsub("misc.","misc",x, fixed=TRUE)
+        x <- gsub("p.p.","pp",x, fixed=TRUE)
+        x <- gsub("P.S.","ps",x, fixed=TRUE)
+        x <- gsub("^","q q q q ",x) # start of line
+        # end of sentences jq and z are least used english letters. Used as placeholders for start and end of sentences
+        x <- gsub("..."," j j j j ",x,fixed=TRUE) # ellipsis
+        x <- gsub("."," j j j j ",x,fixed=TRUE) # full stops
+        x <- gsub("?{1,20}"," j j j j ",x,fixed=TRUE) # question marks
+        x <- gsub("!{1,20}"," j j j j ",x) # exclamation marks
+}
+```
+
+#### Clean texts
+```{r eval=FALSE}
+blog1 <- cleanText(blog)
+news1 <- cleanText(news)
+tweets1 <- cleanText(tweets)
+```
+
+```{r eval=FALSE, echo=FALSE}
+#### Test cleaning
+testCleanText <- function(x){
+        grep("Prof.",x,fixed=TRUE)
+        grep("Dr.",x,fixed=TRUE)
+        grep("Hon.",x,fixed=TRUE)
+        grep("Esq.",x,fixed=TRUE)
+        grep("Jr.",x,fixed=TRUE)
+        grep("Mr.",x,fixed=TRUE)
+        grep("Mrs.",x,fixed=TRUE)
+        grep("Ms.",x,fixed=TRUE)
+        grep("Messrs.",x,fixed=TRUE)
+        grep("Mmes.",x,fixed=TRUE)
+        grep("Msgr.",x,fixed=TRUE)
+        grep("et.c.",x,fixed=TRUE)
+}
+```
+```{r eval=FALSE, echo=FALSE}
+result1 <- testCleanText(blog1)
+result2 <- testCleanText(news1)
+result3 <- testCleanText(tweets1)
+```
+### Corpus creation and further cleaning
+
+These cleaned files were then used to create the document corpus from which to develop the model. 
+```{r eval=FALSE}
+cname <- file.path(".","trialclean")
+x <- DirSource(cname)
+docs <- PCorpus(x,
+        readerControl = list(reader = reader(x), language = "en"),
+        dbControl = list(dbName = "corpus/docsTrain", dbType = "DB1"))
+saveRDS(docs,"corpus/docs.rds")
+```
+The corpus required further preparation before it could be analysed. This included removal of unicode elements, profanity, punctuation, numbers and foreign characters. Excess whitespace was then removed and the whole text was converted to lowercase. A final inspection was used to confirm that the text now looked tidy enough for use.
+
+```{r eval=FALSE}
+### Remove unicode 
+# Reference http://stackoverflow.com/questions/24147816/remove-unicode-f0b7-from-corpus-text
+removeCharacters <-function (x, characters)  {
+        gsub(sprintf("(*UCP)(%s)", paste(characters, collapse = "|")), "", x, perl = TRUE)
+}
+```
+
+```{r eval=FALSE}
+#### Convert to lower case and tidy
+tidyDocs <- function(docs){
+        unicodeTerms <- c("\u0093","\u0094","\u0095", "\u0096", "\u0097", "u2615","\u26c4","\u270a","\u0080","\u009d")
+        docs <- tm_map(docs, tolower)
+        # docs <- tm_map(docs, content_transformer(tolower))
+        docs <- tm_map(docs,removeCharacters,unicodeTerms)
+        badwords <- read.table("badwords/badwords.txt", header=FALSE, sep="\n")
+        docs <- tm_map(docs, removeWords, badwords)
+        docs <- tm_map(docs, removeNumbers)
+        # docs <- tm_map(docs, removePunctuation,preserve_intra_word_dashes = TRUE)
+        docs <- tm_map(docs, removePunctuation)
+        # docs <- tm_map(docs, removeWords, stopwords("english"))
+        docs <- tm_map(docs, stripWhitespace)
+        docs <- tm_map(docs, PlainTextDocument)
+}
+```
+
+```{r eval=FALSE}
+#### Apply Tidy Docs Function
+docs <- tidyDocs(docs)
+inspect(head(docs[1]))
+```
+### Creation of term-document matrices
+Term-document matrices are the counting of occurrences within a document corpus of individual word terms. They are the statistical basis on which sentiment analysis, machine translation algorithms and voice recognition algorithms are based. 
+```{r eval=FALSE}
+start <- Sys.time()
+ngramtokenizer1 <- function(x) NGramTokenizer(x, Weka_control(min = 1, max = 1))
+tdm1 <- TermDocumentMatrix(docs, control = list(tokenize = ngramtokenizer1))
+ngramtokenizer2 <- function(x) NGramTokenizer(x, Weka_control(min = 2, max = 2))
+tdm2 <- TermDocumentMatrix(docs, control = list(tokenize = ngramtokenizer2))
+ngramtokenizer3 <- function(x) NGramTokenizer(x, Weka_control(min = 3, max = 3))
+tdm3 <- TermDocumentMatrix(docs, control = list(tokenize = ngramtokenizer3))
+ngramtokenizer4 <- function(x) NGramTokenizer(x, Weka_control(min = 4, max = 4))
+tdm4 <- TermDocumentMatrix(docs, control = list(tokenize = ngramtokenizer4))
+ngramtokenizer5 <- function(x) NGramTokenizer(x, Weka_control(min = 5, max = 5))
+tdm5 <- TermDocumentMatrix(docs, control = list(tokenize = ngramtokenizer5))
+end <- Sys.time()
+end - start
+```
+
+### Final cleaning and data preparation
+
+One of the problems with term-documents is that they can reach a considerable size. To make the task more manageable I therefore decided to reduce the size of the task. During my visual inspections I noted that a considerable proportion of unique occurrences of n-grams were due to misspellings. However, these were very irregular and therefore difficult to filter accurately using regular expressions. I therefore used simple frequency counts to reduce the size of the matrices. The count frequencies were then determined using the ``row_sum()`` function of the ``slam`` package. The start and end of sentence markers were also removed.
+
+```{r eval=FALSE}
+# Create text table
+tdm1 <- readRDS("trialclean/tdm1.rds")
+tdm1count <- row_sums(tdm1)
+tdm1small <- tdm1count[tdm1count >=10]
+tdm1df <- data.frame(tdm1small)
+write.table(tdm1df,"trialclean/tdm1.txt") # 600 KB
+tdm1a <- read.table("trialclean/tdm1.txt",header=FALSE, skip= 1)
+tdm1a$P <- log(tdm1a$V2) - log(nrow(tdm1a))
+write.table(tdm1a,"trialclean/tdm1a.txt") # 1.7 MB
+tdm1a <- read.table("trialclean/tdm1a.txt", header=TRUE, stringsAsFactors=FALSE)
+```
+
+```{r eval=FALSE}
+# Create text table
+tdm2 <- readRDS("trialclean/tdm2.rds")
+tdm2count <- row_sums(tdm2)
+tdm2small <- tdm2count[tdm2count >=5]
+tdm2df <- data.frame(tdm2small)
+write.table(tdm2df,"trialclean/tdm2.txt") # 6.6 MB
+tdmTest <- read.table("trialclean/tdm2.txt",header=FALSE, skip= 1)
+filter <- grep("(\\s[j])+|\\s[q])+|([j]\\s)+|([q]\\s)+",tdmTest$V1) # remove sentence markers
+tdm2a<- tdmTest[-filter,]
+tdm2a$V2 <- tdm2a$V2 - 0.77
+tdm2a$P <- log(tdm2a$V2) - log(nrow(tdm2a))
+write.table(tdm2a,"trialclean/tdm2a.txt") # 16 MB
+tdm2a <- read.table("trialclean/tdm2a.txt", header=TRUE, stringsAsFactors=FALSE)
+```
+
+```{r echo=FALSE, eval=FALSE}
+# Create text table
+tdm3 <- readRDS("trialclean/tdm3.rds")
+tdm3count <- row_sums(tdm3)
+tdm3small <- tdm3count[tdm3count >=5]
+tdm3df <- data.frame(tdm3small)
+write.table(tdm3df,"trialclean/tdm3.txt") # 7.8 MB
+tdmTest <- read.table("trialclean/tdm3.txt",header=FALSE, skip= 1)
+filter <- grep("(\\s[j])+|\\s[q])+|([j]\\s)+|([q]\\s)+",tdmTest$V1) # remove sentence markers
+tdm3a<- tdmTest[-filter,]
+tdm3a$V2 <- tdm3a$V2 - 0.86
+tdm3a$P <- log(tdm3a$V2) - log(nrow(tdm3a))
+write.table(tdm3a,"trialclean/tdm3a.txt") # 14 MB
+tdm3a <- read.table("trialclean/tdm3a.txt", header=TRUE, stringsAsFactors=FALSE)
+```
+
+```{r echo=FALSE, eval=FALSE}
+# Create text table
+tdm4 <- readRDS("trialclean/tdm4.rds")
+tdm4count <- row_sums(tdm4)
+tdm4small <- tdm4count[tdm4count >=5]
+tdm4df <- data.frame(tdm4small)
+write.table(tdm4df,"trialclean/tdm4.txt") # 5.5 MB
+tdmTest <- read.table("trialclean/tdm4.txt",header=FALSE, skip= 1)
+filter <- grep("(\\s[j])+|\\s[q])+|([j]\\s)+|([q]\\s)+",tdmTest$V1) # remove sentence markers
+tdm4a<- tdmTest[-filter,]
+tdm4a$V2 <- tdm4a$V2 - 0.92
+tdm4a$P <- log(tdm4a$V2) - log(nrow(tdm4a))
+write.table(tdm4a,"trialclean/tdm4a.txt") # 6.3 MB
+tdm4a <- read.table("trialclean/tdm4a.txt", header=TRUE, stringsAsFactors=FALSE)
+```
+
+```{r echo=FALSE, eval=FALSE}
+# Create text table
+tdm5 <- readRDS("trialclean/tdm5.rds")
+tdm5count <- row_sums(tdm5)
+tdm5small <- tdm5count[tdm5count >=5]
+tdm5df <- data.frame(tdm5small)
+write.table(tdm5df,"trialclean/tdm5.txt") # 5.1 MB
+tdmTest <- read.table("trialclean/tdm5.txt",header=FALSE, skip= 1)
+filter <- grep("(\\s[j])+|\\s[q])+|([j]\\s)+|([q]\\s)+",tdmTest$V1) # remove sentence markers
+tdm5a<- tdmTest[-filter,]
+tdm5a$V2 <- tdm5a$V2 - 0.95
+tdm5a$P <- log(tdm5a$V2) - log(nrow(tdm5a))
+write.table(tdm5a,"trialclean/tdm5a.txt") # 1.6 MB
+tdm5a <- read.table("trialclean/tdm5a.txt", header=TRUE, stringsAsFactors=FALSE)
+```
+### Model building
+
+My reading on Natural Language Modelling had suggested that the Kneser-Ney algorithm with interpolated back-off would likely be the most useful algorithm. One of the key problems with language prediction is that there are so many potential combinations and permutation of words and word sequences that, however large the corpus studied, not all possibilities will be encountered.
+
+Kneser-Ney uses the intuition that some words are seen in combination more frequently than others. For example, the word "In" can be followed by a very large number of different types of nouns. However, "San" is more likely to be followed by a limited number of town names, such as "San Francisco". If the N-gram is not seen, Kneser-Ney biases the terms suggested in proportion to their likelihood to be seen in combination in a given corpus.
+
+The modified Kneser-Ney algorithm that I used was:
+$$P_{KN}(w_i|w_{i-n+1}^{i-1}) = \frac{max\{N_1 + (\bullet w_{i-n+1}^{i}) - D,0\}}{N_{1+}(\bullet w_{i-n+1}^{i-1}\bullet)} + \frac{D}{N_{1+}(\bullet w_{i-n+1}^{i-1}\bullet)}N_{1+}(w_{i-n+1}^{i-1}\bullet)P_{KN}(w_i|w_{i-n+2}^{i-1})$$
+
+i.e. discounted bigram + interpolated weight*unigram probability
+
+Continuation probability is proportional to the number of words that precede our final word in the N-gram, with counts only being used for the highest order N-grams.
+
+#### Creation of probability tables
+
+The next step was to implement the model. This involved creating a probability table for all the data. I decided to use a similar structure to the [ARPA file format][7] for backoff N-gram models. An excerpt from the final table is shown below. This shows that the likelihood of a particular word appearing in a longer N-gram reduces with the length of the N-gram, indicated by the increasing number of NA terms.
+
+row     | term            | X1gram        | X2gram         | X3gram  | X4gram  | X5gram
+------- | --------------- | ------------- | -------------  | ------- | ------- | -----        
+50      | abdominal       | -6.892100     | NA             | NA      | NA      | NA
+51      | abducted        | -7.035201     | -10.25         | NA      | NA      | NA
+52      | abduction       | -7.061176     | -10.25         | NA      | NA      | NA
+53      | abdul           | -6.827562     | -10.25         | NA      | NA      | NA
+54      | abduljabbar     | -8.300867     | NA             | NA      | NA      | NA
+55      | abdullah        | -6.848615     | -9.56          | NA      | NA      | NA
+56      | abdulmutallab   | NA            | -10.259447     | -9.31   | NA      | NA
+57      | abe             | -7.264775     | NA             | NA      | NA      | NA
+58      | abel            | -7.087845     | NA             | NA      | NA      | NA
+
+**Table 1:** ARPA-like format chosen for the final model. The final table consisted of 864315 rows of 1-grams, 2-grams, 3-grams, 4-grams, and 5-grams. The final text file was 51.4 MB, which comfortably met the Shiny.io website size restrictions.
+
+##### Get list of final words
+
+I first created a function to extract the final n words in a phrase. This was then applied to the various terms-count table to create frequency tables for each term. This was then used to calculate the back of weight for each of the N-grams using the Kneser-Ney formula.
+
+```{r eval=FALSE}
+library(stringr)
+getFinalWords <- function(x,n,ngram){
+        # x = dataframe
+        # n = number of words
+        # ngram = ngram length
+        ng <- ngram - n +1
+        amen <- character()
+        for(i in 1:nrow(x)){
+                sentence <- x$V1[i]
+                amen[i] <- word(sentence,ng,-1)
+        }
+        amen
+}
+```
+```{r eval=FALSE}
+terminal5 <- getFinalWords(tdm5a,1,5)
+terminal5 <- data.frame(table(terminal5))
+write.table(terminal5,"trialclean/terminal5.txt")
+terminal4 <- getFinalWords(tdm4a,1,4)
+terminal4 <- data.frame(table(terminal4))
+write.table(terminal4,"trialclean/terminal4.txt")
+terminal3 <- getFinalWords(tdm3a,1,3)
+terminal3 <- data.frame(table(terminal3))
+write.table(terminal3,"trialclean/terminal3.txt")
+terminal2 <- getFinalWords(tdm2a,1,2)
+terminal2 <- data.frame(table(terminal2))
+write.table(terminal2,"trialclean/terminal2.txt")
+```
+
+```{r echo=FALSE, eval=FALSE}
+terminal52 <- getFinalWords(tdm5a,2,5)
+terminal52 <- data.frame(table(terminal52))
+write.table(terminal52,"trialclean/terminal52.txt")
+terminal42 <- getFinalWords(tdm4a,2,4)
+terminal42 <- data.frame(table(terminal42))
+write.table(terminal42,"trialclean/terminal42.txt")
+terminal32 <- getFinalWords(tdm3a,2,3)
+terminal32 <- data.frame(table(terminal32))
+write.table(terminal32,"trialclean/terminal32.txt")
+```
+
+```{r echo=FALSE, eval=FALSE}
+terminal53 <- getFinalWords(tdm5a,3,5)
+terminal53 <- data.frame(table(terminal53))
+write.table(terminal53,"trialclean/terminal53.txt")
+terminal43 <- getFinalWords(tdm4a,3,4)
+terminal43 <- data.frame(table(terminal43))
+write.table(terminal43,"trialclean/terminal43.txt")
+```
+
+```{r echo=FALSE, eval=FALSE}
+terminal54 <- getFinalWords(tdm5a,4,5)
+terminal54 <- data.frame(table(terminal54))
+write.table(terminal54,"trialclean/terminal54.txt")
+```
+
+#### Convert counts to log(probabilities)
+
+Absolute counts were then converted to log(probabilites). Finally the data was merged into the ARPA-like structure shown above.
+
+```{r eval=FALSE}
+term21$P2 <- log(term21$counts/nrow(term21))
+term31$P2 <- log(term31$counts/nrow(term31))
+term41$P2 <- log(term41$counts/nrow(term41))
+term51$P2 <- log(term51$counts/nrow(term51))
+term32$P3 <- log(term32$counts/nrow(term32))
+term42$P3 <- log(term42$counts/nrow(term42))
+term52$P3 <- log(term52$counts/nrow(term52))
+term43$P4 <- log(term43$counts/nrow(term43))
+term53$P4 <- log(term53$counts/nrow(term53))
+term54$P5 <- log(term54$counts/nrow(term54))
+```
+
+### Model Development
+
+The formal testing of Statistical Natural Language Models is complex and time-consuming. It is usually performed in one of two ways. The first involves using a test set of data held back from the original documents to determine the perplexity of the model. Although the general approach to this was covered by Jurafsky, I was unable to obtain sufficient details to implement this.
+
+The second formal approach involves using the model in a real-world setting, such as in word prediction or voice recognition. Jurafsky cautions that this is very time-consuming (and therefore expensive).
+
+I therefore used an informal technique, namely to try a number of word strings for which I had intuitive expectations of the results. I developed a test set of these through this inuitive process. For example, I would expect "president obama" to give a higher likelihood that "president putin" or "president merkel".
+
+#### Create basic prediction function
+```{r eval=FALSE}
+# Take dictionary, search string, and number of output terms
+# Return a list of candidate terms for display
+wordrec <- function(x,dict,n=5){
+        # dict is the ARPA-like probability table
+        # x is search string
+        # ngram is which column being searched: bigram, trigram etc probability
+        stub <- paste0("^",x)
+        words <- dict
+        result <- words[grep(stub,words$term),]
+        if(all(is.na(result$X5gram))){
+                result <- result[order(-result$X5gram),]
+        }
+        else if(all(is.na(result$X4gram))){
+                result <- result[order(-result$X4gram),]
+        }
+        else if(all(is.na(result$X3gram))){
+                result <- result[order(-result$X3gram),]
+        }
+        else if(all(is.na(result$X2gram))){
+                result <- result[order(-result$X2gram),]
+        }
+        else{
+                result <- result[order(-result$X1gram),]
+        }
+        res <- result$term[1:n]
+        res <- res[!is.na(res)]
+        res
+}
+```
+
+#### Model checking
+
+##### Sense check of name probabilities
+```{r eval=FALSE}
+Expect barack obama > president obama > president putin 
+wordrec("^barack obama")
+wordrec("president obama")
+wordrec("president putin")
+wordrec("president merkel")
+wordrec("angela merkel")
+wordrec("david cameron")
+wordrec("prime minister")
+wordrec("margaret thatcher")
+```
+
+```{r eval=FALSE}
+# Expect clooney > redford > wayne > peppard
+wordrec("george clooney")
+wordrec("robert redford")
+wordrec("john wayne")
+wordrec("george peppard")
+```
+
+##### Sense check of weather probabilities
+```{r eval=FALSE}
+# Expect sun > rain > snow > hail > sleet
+wordrec("the sun")
+wordrec("the rain")
+wordrec("the snow")
+wordrec("the hail")
+wordrec("the sleet")
+```
+
+### App creation
+I decided to create a small demonstration project using Shiny. This presented a space limitation of 256 MB on my model.
+
+The simplest implementation was to create a ui.R function that displayed a search box in a side panel, while the results of the search could be visualised in a table. The details are presented in my second Final Data Product Presentation.
+
+Conclusions
+-----------
+I began the Data Science Specialisation with no knowledge of R at all, and a limited perception of what progress had been made in this area over the last decade. I began the Capstone Project with little knowledge of the implementation of natural language models. I hope that I have managed to encapsulate some of the learning that I have acquiring during this intellectual journey. It has been challenging, at times frustrating, but ultimately exhilarating. I feel priviedged to have been part of an extraordinary group of Capstone pioneers. I hope that we can keep our network going to do wonderful things together beyond the confines of this Specialisation. I also pay tribute to a wonderful group of teachers who have raised the bar high and challenged us all.
+
+[1]: https://class.coursera.org/nlp/lecture/20
+[2]: http://cran.r-project.org/web/packages/tm/index.html
+[3]: http://cran.r-project.org/web/packages/RWeka/index.html
+[4]: http://u.cs.biu.ac.il/~yogo/courses/mt2013/papers/chen-goodman-99.pdf
+[5]: http://www.uni-koblenz-landau.de/campus-koblenz/fb4/west/theses/modified-kneser-ney-smoothing-on-top-of-generalized-language-models-for-next-word-prediction
+[6]: http://web.mit.edu/6.863/www/fall2012/readings/ngrampages.pdf
+[7]: http://www.speech.sri.com/projects/srilm/manpages/ngram-format.5.html
