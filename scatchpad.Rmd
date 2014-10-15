@@ -1,0 +1,52 @@
+---
+title: "Scratchpad"
+author: "casm"
+date: "15 October 2014"
+output: html_document
+---
+```{r}
+setwd("~/datasciencecoursera")
+words <- read.table("ptable.txt",header=TRUE,stringsAsFactors=FALSE)
+```
+
+
+```{r}
+library(stringr)
+x <- "the royal"
+stub <- character()
+for(i in -5:-1){
+        result <- try(word(x,i,-1))
+        if(class(result) != "try-error") stub <- c(stub,result)
+}
+stub <- unique(stub)
+for(i in 1:length(stub)){
+        result <- ptable[grep(paste0("^",stub[i]),ptable$term,ignore.case = TRUE),]
+        if(nrow(result) !=0) result
+}
+result <- result[with(result, order(-p)), ]
+result <- result[1:10,]
+result <- result[complete.cases(result),]
+ifelse(result,result,"Sorry! No suggestions")
+result
+```
+
+```{r}
+words$terms <- sapply(words$term,strsplit," ")
+words$termLength <- sapply(words$terms,length)
+for(i in 1:nrow(words)){
+        if (words$termLength[i]==5) words$X1gram[i] <- words$X5gram[i]
+        if (words$termLength[i]==4) words$X1gram[i] <- words$X4gram[i]
+        if (words$termLength[i]==3) words$X1gram[i] <- words$X3gram[i]
+        if (words$termLength[i]==2) words$X1gram[i] <- words$X2gram[i]
+}
+```
+
+```{r}
+ptable <- words[,c(1:2,8)]
+colnames(ptable) <- c("term","p","termNo")
+ptable <- na.omit(ptable)
+write.table(ptable,"ptable1.txt")
+```
+
+
+
